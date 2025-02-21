@@ -1,0 +1,102 @@
+---
+- name: Setup Cloud Image in VirtualBox
+  hosts: localhost
+  become: true
+  vars:
+    qcow2_image: "Rocky-9.qcow2"      # Change this to your QCOW2 file
+    vdi_image: "cloud-image.vdi"
+    vm_name: "cloud-vm"
+    iso_name: "cloud-init.iso"
+    user_name: "ubuntu"
+    user_password: "ubuntu"               # Change this for security
+
+  tasks:
+    - name: Install dependencies
+      apt:
+        name:
+          - qemu-utils
+          - genisoimage
+          - cloud-utils
+          - virtualbox
+        state: present
+        update_cache: yes
+
+    - name: Convert QCOW2 to VDI
+      command: "qemu-img convert -O vdi {{ qcow2_image }} {{ vdi_image }}"
+      args:
+        creates: "{{ vdi_image }}"
+
+    - name: Create cloud-init directory
+      file:
+        path: /tmp/cloud-init
+        state: directory
+
+    - name: Create user-data file
+      copy:
+        dest: "/tmp/cloud-init/user-data"
+        content: |
+          #cloud-config
+          hostname: {{ vm_name }}
+          manage_etc_hosts: true
+          users:
+            - name: {{ user_name }}
+              sudo: ALL=(ALL) NOPASSWD:ALL
+              groups: users, admin
+              shell: /bin/bash
+              lock_passwd: false
+              passwd: "{{ user_password | password_hash('sha512') }}"
+          ssh_pwauth: true
+          disable_root: false
+          chpasswd:
+            expire: false
+
+    - name: Create meta-data file
+      copy:
+        dest: "/tmp/cloud-init/meta-data"
+        content: |
+          instance-id: {{ vm_name }}
+          local-hostname: {{ vm_name }}
+
+    - name: Create network-config file
+      copy:
+        dest: "/tmp/cloud-init/network-config"
+        content: |
+          version: 2
+          ethernets:
+            ens3:
+              dhcp4: true
+
+    - name: Generate Cloud-Init ISO
+      command: "genisoimage -output /tmp/{{ iso_name }} -volid cidata -joliet -rock /tmp/cloud-init/user-data /tmp/cloud-init/meta-data /tmp/cloud-init/network-config"
+      args:
+        creates: "/tmp/{{ iso_name }}"
+
+    - name: Create VirtualBox VM
+      command: >
+        VBoxManage createvm --name {{ vm_name }} --ostype "Ubuntu_64" --register
+      args:
+        creates: "~/VirtualBox VMs/{{ vm_name }}"
+
+    - name: Configure VM settings
+      command: >
+        VBoxManage modifyvm {{ vm_name }} --memory 2048 --cpus 2 --nic1 nat --boot1 disk --boot2 dvd
+
+    - name: Attach VDI disk to VM
+      command: >
+        VBoxManage storagectl {{ vm_name }} --name "SATA Controller" --add sata --controller IntelAhci
+
+    - name: Attach Virtual Disk
+      command: >
+        VBoxManage storageattach {{ vm_name }} --storagectl "SATA Controller" --port 0 --device 0 --type hdd --medium {{ vdi_image }}
+
+    - name: Attach Cloud-Init ISO
+      command: >
+        VBoxManage storagectl {{ vm_name }} --name "IDE Controller" --add ide
+
+    - name: Attach ISO to VM
+      command: >
+        VBoxManage storageattach {{ vm_name }} --storagectl "IDE Controller" --port 0 --device 0 --type dvddrive --medium /tmp/{{ iso_name }}
+
+    - name: Start the Virtual Machine
+      command: "VBoxManage startvm {{ vm_name }} --type headless"
+
